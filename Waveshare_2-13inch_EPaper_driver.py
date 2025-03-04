@@ -1,7 +1,7 @@
 import machine
 import time
 
-# Display resolution (from original python driver)
+# Display resolution (from original driver)
 EPD_WIDTH = 122
 EPD_HEIGHT = 250
 
@@ -16,6 +16,7 @@ class FrameBuffer:
         self.buffer = bytearray([bg] * self.buffer_size)
     
     def clear(self, color=0xff):
+        """Clear the framebuffer by filling it with the given color (0x00 for black, 0xff for white)."""
         for i in range(self.buffer_size):
             self.buffer[i] = color
 
@@ -44,9 +45,7 @@ class FrameBuffer:
         The 'color' parameter follows the same convention as in draw_pixel.
         The optional 'thickness' parameter (default 1) controls the line thickness.
         
-        For thickness > 1, the algorithm draws a small block (a filled square) centered on
-        each point of the line. For even thickness values, the block is offset slightly to
-        ensure the correct number of pixels are drawn.
+        For thickness > 1, the algorithm draws lines above and below current one
         """
         dx = abs(x1 - x0)
         dy = -abs(y1 - y0)
@@ -68,27 +67,12 @@ class FrameBuffer:
                     err += dx
                     y0 += sy
         else:
-            # For thicker lines, draw a filled square (brush) around each pixel
-            if thickness % 2 == 1:
-                offset_range = range(-thickness // 2, thickness // 2 + 1)
-            else:
-                offset_range = range(-thickness // 2, thickness // 2)
-            
-            while True:
-                # Draw a block centered at (x0, y0)
-                for ox in offset_range:
-                    for oy in offset_range:
-                        self.draw_pixel(x0 + ox, y0 + oy, color)
-                if x0 == x1 and y0 == y1:
-                    break
-                e2 = 2 * err
-                if e2 >= dy:
-                    err += dy
-                    x0 += sx
-                if e2 <= dx:
-                    err += dx
-                    y0 += sy
-
+            x0t = x0 - int(thickness/2)
+            x1t = x1 - int(thickness/2)
+            for i in range(thickness):
+                self.draw_line(x0t, y0, x1t, y1, color)
+                x0t+=1
+                x1t+=1
 
 
 class EPD:
@@ -285,13 +269,15 @@ if __name__ == '__main__':
     # Create an EPD instance and initialize it
     epd = EPD(spi, cs_pin=9, dc_pin=8, rst_pin=12, busy_pin=13)
     epd.init()
-    # Clear the display (fill with white)
+    # Clear the display
     epd.Clear(0xff)
     
     # Display a line
     image_buffer = FrameBuffer()
-    image_buffer.draw_line(0, 0, 100, 200, 0x00, 2)
+    image_buffer.draw_line(100, 100, 50, 200, 0x00, 60)
     epd.display(image_buffer.buffer)
 
     # Put the display to sleep when done
     epd.sleep()
+
+
