@@ -1,9 +1,36 @@
 import machine
 import time
+import math
+import json
 
 # Display resolution (from original driver)
 EPD_WIDTH = 122
 EPD_HEIGHT = 250
+
+def scale_polygon(polygon, scale):
+    if scale == 1:
+        return polygon
+    return [[int(round(x * scale)), int(round(y * scale))] for x, y in polygon]
+
+def move_polygon(polygon, delta_x, delta_y):
+    return [[int(x + delta_x), int(y + delta_y)] for x, y in polygon]
+
+def rotate_polygon(polygon, angle):
+    """Rotate the polygon by a given angle in degrees clockwise."""
+    if angle == 0:
+        return polygon
+    rad = math.radians(angle)
+    cos_theta = math.cos(rad)
+    sin_theta = math.sin(rad)
+    
+    rotated = []
+    for x, y in polygon:
+        # Apply the rotation matrix:
+        x_new = x * cos_theta - y * sin_theta
+        y_new = x * sin_theta + y * cos_theta
+        rotated.append([int(round(x_new)), int(round(y_new))])
+    
+    return rotated
 
 class FrameBuffer:
     def __init__(self, width=EPD_WIDTH, height=EPD_HEIGHT, bg=0xff):
@@ -12,11 +39,10 @@ class FrameBuffer:
         # Calculate how many bytes are needed per row (rounding up)
         self.line_bytes = (width + 7) // 8
         self.buffer_size = self.line_bytes * height
-        # Initialize the buffer; use 0x00 for black, or 0xff for white
         self.buffer = bytearray([bg] * self.buffer_size)
+
     
     def clear(self, color=0xff):
-        """Clear the framebuffer by filling it with the given color (0x00 for black, 0xff for white)."""
         for i in range(self.buffer_size):
             self.buffer[i] = color
 
@@ -39,13 +65,10 @@ class FrameBuffer:
         else:
             self.buffer[byte_index] &= ~bit
 
-    def draw_line(self, x0, y0, x1, y1, color, thickness=1):
+    def draw_line(self, x0, y0, x1, y1, color):
         """
         Draw a line from (x0, y0) to (x1, y1) using Bresenham's algorithm.
         The 'color' parameter follows the same convention as in draw_pixel.
-        The optional 'thickness' parameter (default 1) controls the line thickness.
-        
-        For thickness > 1, the algorithm draws lines above and below current one
         """
         dx = abs(x1 - x0)
         dy = -abs(y1 - y0)
@@ -53,31 +76,89 @@ class FrameBuffer:
         sy = 1 if y0 < y1 else -1
         err = dx + dy  # error value
 
-        if thickness == 1:
-            # Standard Bresenham's algorithm
-            while True:
-                self.draw_pixel(x0, y0, color)
-                if x0 == x1 and y0 == y1:
-                    break
-                e2 = 2 * err
-                if e2 >= dy:
-                    err += dy
-                    x0 += sx
-                if e2 <= dx:
-                    err += dx
-                    y0 += sy
+        # Bresenham's algorithm
+        while True:
+            self.draw_pixel(x0, y0, color)
+            if x0 == x1 and y0 == y1:
+                break
+            e2 = 2 * err
+            if e2 >= dy:
+                err += dy
+                x0 += sx
+            if e2 <= dx:
+                err += dx
+                y0 += sy
+                    
+    def draw_polygon(self, point_list, color, fill=False):
+        # makes an outline by drawing lines (end of first line is start of a second one)
+        old_point = point_list[-1]
+        for point in point_list:
+            self.draw_line(*old_point, *point, color)
+            old_point = point
+            
+            if fill:
+                # Compute the bounding box for the polygon
+                ys = [p[1] for p in point_list]
+                min_y = max(min(ys), 0)
+                max_y = min(max(ys), self.height - 1)
+
+                # For each scanline between min_y and max_y:
+                for y in range(min_y, max_y + 1):
+                    intersections = []
+                    n = len(point_list)
+                    for i in range(n):
+                        p1 = point_list[i]
+                        p2 = point_list[(i + 1) % n]
+                        # Skip horizontal edges to avoid duplicates
+                        if p1[1] == p2[1]:
+                            continue
+                        # Check if the scanline crosses the edge
+                        if (y >= min(p1[1], p2[1])) and (y < max(p1[1], p2[1])):
+                            # Linear interpolation to find intersection x-coordinate
+                            x_int = p1[0] + (y - p1[1]) * (p2[0] - p1[0]) / (p2[1] - p1[1])
+                            intersections.append(x_int)
+                    intersections.sort()
+                    # Fill between pairs of intersections
+                    for i in range(0, len(intersections), 2):
+                        if i + 1 < len(intersections):
+                            x_start = int(math.ceil(intersections[i]))
+                            x_end = int(math.floor(intersections[i + 1]))
+                            # Clip to display boundaries
+                            x_start = max(x_start, 0)
+                            x_end = min(x_end, self.width - 1)
+                            for x in range(x_start, x_end + 1):
+                                self.draw_pixel(x, y, color)
+                                
+    def draw_text(self, x, y, text, size, color, fill=False, rotate=0):
+        tx = x
+        ty = y
+        
+        if rotate:
+            rad = math.radians(rotate)
+            advance_dx = 7 * size * math.cos(rad)
+            advance_dy = 7 * size * math.sin(rad)
+            del rad
         else:
-            x0t = x0 - int(thickness/2)
-            x1t = x1 - int(thickness/2)
-            for i in range(thickness):
-                self.draw_line(x0t, y0, x1t, y1, color)
-                x0t+=1
-                x1t+=1
+            advance_dx = 7 * size
+            advance_dy = 0
+        
+        with open('characters.json', 'r') as file:
+            data = json.load(file)
+        for c in text:
+            if c == " ":
+                tx += advance_dx
+                ty += advance_dy
+                continue
+            char_polygon = data[c]
+            self.draw_polygon(move_polygon(rotate_polygon(scale_polygon(char_polygon, size), rotate), tx, ty), color, fill)
+            tx += advance_dx
+            ty += advance_dy
 
 
 class EPD:
     def __init__(self, spi, cs_pin, dc_pin, rst_pin, busy_pin):
         # Set up hardware pins
+        self.fbuf = FrameBuffer()
         self.spi = spi
         self.cs = machine.Pin(cs_pin, machine.Pin.OUT)
         self.dc = machine.Pin(dc_pin, machine.Pin.OUT)
@@ -188,10 +269,11 @@ class EPD:
 
     def init_fast(self):
         self.reset()
+        self.ReadBusy()
         self.send_command(0x12)  # SWRESET
         self.ReadBusy()
         self.send_command(0x18)  # Read built-in temperature sensor
-        self.send_command(0x80)
+        self.send_data(0x80)
         self.send_command(0x11)  # Data entry mode
         self.send_data(0x03)
         self.SetWindow(0, 0, self.width - 1, self.height - 1)
@@ -209,18 +291,18 @@ class EPD:
         self.ReadBusy()
         return 0
 
-    def display(self, image):
+    def display(self):
         # image should be a buffer (list or bytearray) of the correct size
         self.send_command(0x24)
-        self.send_data2(image)
+        self.send_data2(self.fbuf.buffer)
         self.TurnOnDisplay()
 
-    def display_fast(self, image):
+    def display_fast(self):
         self.send_command(0x24)
-        self.send_data2(image)
+        self.send_data2(self.fbuf.buffer)
         self.TurnOnDisplay_Fast()
-
-    def displayPartial(self, image):
+        
+    def init_part(self):
         self.rst.value(0)
         self.delay_ms(1)
         self.rst.value(1)
@@ -234,18 +316,24 @@ class EPD:
         self.send_data(0x03)
         self.SetWindow(0, 0, self.width - 1, self.height - 1)
         self.SetCursor(0, 0)
+
+
+    def displayPartial(self):
+        self.SetWindow(0, 0, self.width - 1, self.height - 1)
+        self.SetCursor(0, 0)
         self.send_command(0x24)  # WRITE_RAM
-        self.send_data2(image)
+        self.send_data2(self.fbuf.buffer)
         self.TurnOnDisplayPart()
 
-    def displayPartBaseImage(self, image):
+    def displayPartBaseImage(self):
         self.send_command(0x24)
-        self.send_data2(image)
+        self.send_data2(self.fbuf.buffer)
         self.send_command(0x26)
-        self.send_data2(image)
+        self.send_data2(self.fbuf.buffer)
         self.TurnOnDisplay()
 
     def Clear(self, color=0xFF):
+        self.fbuf.clear(color)
         # Calculate line width (in bytes)
         if self.width % 8 == 0:
             linewidth = self.width // 8
@@ -254,30 +342,54 @@ class EPD:
         self.send_command(0x24)
         self.send_data2([color] * (self.height * linewidth))
         self.TurnOnDisplay()
+        
+    def ClearPart(self, color=0xFF):
+        self.fbuf.clear(color)
+        # Calculate line width (in bytes)
+        if self.width % 8 == 0:
+            linewidth = self.width // 8
+        else:
+            linewidth = (self.width // 8) + 1
+        self.send_command(0x24)
+        self.send_data2([color] * (self.height * linewidth))
+        self.TurnOnDisplayPart()
 
     def sleep(self):
         self.send_command(0x10)  # Enter deep sleep
         self.send_data(0x01)
-        self.delay_ms(2000)
+        self.delay_ms(200)
         # Optionally deinitialize SPI or set pins to a low-power state
-        # self.spi.deinit()
+        self.rst.value(0)
 
-# Example usage:
+# Example usage
 if __name__ == '__main__':
-    # Initialize SPI
+    # Initialize SPI and EDP instance
+    # Adjust pin numbers for your wiring
     spi = machine.SPI(1, baudrate=2000000, polarity=0, phase=0, sck=machine.Pin(10), mosi=machine.Pin(11))
-    # Create an EPD instance and initialize it
     epd = EPD(spi, cs_pin=9, dc_pin=8, rst_pin=12, busy_pin=13)
     epd.init()
     # Clear the display
     epd.Clear(0xff)
-    
+    # Display 3 triangles
+    epd.fbuf.draw_polygon([[0, 0], [25, 200], [0, 225]], 0x00, True)
+    epd.fbuf.draw_polygon([[0, 0], [50, 175], [30, 195]], 0x00, False)
+    epd.fbuf.draw_polygon([[0, 0], [75, 125], [55, 170]], 0x00, True)
     # Display a line
-    image_buffer = FrameBuffer()
-    image_buffer.draw_line(100, 100, 50, 200, 0x00, 60)
-    epd.display(image_buffer.buffer)
+    epd.fbuf.draw_line(78, 0, 78, 300, 0x00)
+    
+    # Fast display
+    epd.display_fast()
+    
+    # Display text
+    epd.fbuf.draw_text(x=110, y=5, text="rusofobia", size=4, color=0x00, fill=True, rotate=90)
+
+    # Partial display
+    epd.init_part()
+    epd.displayPartial()
+    
+    # Partial clear
+    time.sleep_ms(2000)
+    epd.ClearPart(0xff)
 
     # Put the display to sleep when done
     epd.sleep()
-
-
